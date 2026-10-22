@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Espectro de audio</title>
+<style>
+  body {
+    margin: 0;
+    background: #0b0b14;
+    color: #ddd;
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+  }
+  canvas {
+    width: 90vw;
+    max-width: 1000px;
+    height: 60vh;
+    background: #000;
+    border-radius: 8px;
+  }
+  button {
+    margin-top: 16px;
+    padding: 10px 24px;
+    font-size: 16px;
+    border: none;
+    border-radius: 6px;
+    background: #3b82f6;
+    color: #fff;
+    cursor: pointer;
+  }
+  select, input { font-size: 14px; }
+  /* En pantalla completa, el lienzo ocupa casi toda la pantalla */
+  :fullscreen canvas { width: 96vw; height: 78vh; max-width: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1000" height="500"></canvas>
+<button id="btn">Iniciar micrófono</button>
+<div id="controles" style="margin-top:12px;display:flex;gap:12px;align-items:center;font-size:15px;">
+  <label>Forma:
+    <select id="forma">
+      <option value="barras">Barras LED</option>
+      <option value="onda">Onda</option>
+    </select>
+  </label>
+  <label>Modo:
+    <select id="modo">
+      <option value="arcoiris">Arcoíris</option>
+      <option value="fijo">Color fijo</option>
+    </select>
+  </label>
+  <label>Color:
+    <input type="color" id="colorFijo" value="#00ffaa">
+  </label>
+  <button id="full" style="margin-top:0;padding:6px 14px;font-size:14px;">Pantalla completa</button>
+</div>
+
+<script>
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const btn = document.getElementById('btn');
+  const fullBtn = document.getElementById('full');
+
+  fullBtn.onclick = () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  };
+  document.addEventListener('fullscreenchange', () => {
+    fullBtn.textContent = document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa';
+  });
+  const W = canvas.width;
+  const H = canvas.height;
+
+  // Área de dibujo, dejando margen para las leyendas de los ejes
+  const L = 60, R = 20, T = 20, B = 50;
+  const PW = W - L - R;
+  const PH = H - T - B;
+
+  btn.onclick = async () => {
+    try {
+      // 1. Permiso del micrófono
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // 2. Analizador de sonido
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 8192;          // más resolución para ver las frecuencias bajas
+      const MIN_DB = -100, MAX_DB = -10; // rango de niveles que se muestra
+      analyser.minDecibels = MIN_DB;
+      analyser.maxDecibels = MAX_DB;
+      analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+
+      const freqData = new Uint8Array(analyser.frequencyBinCount);
+      const waveData = new Uint8Array(analyser.fftSize);
+
+      // Cada posición del arreglo de frecuencias equivale a estos Hz
+      const binHz = audioCtx.sampleRate / analyser.fftSize;
+
+      // Configuración de las barras LED
+      const NB = 32;          // número de columnas
+      const NS = 24;          // número de LEDs por columna
+      const F0 = 10, F1 = 16000; // rango de frecuencias visible (Hz)
+      const barW = PW / NB;
+      const bw = barW * 0.7;  // ancho de cada columna
+      const segH = PH / NS;   // alto de cada LED
+      const gap = 3;          // separación entre LEDs
+
+      // Qué bins de frecuencia usa cada columna (escala logarítmica, como el oído)
+      const ranges = [];
+      for (let i = 0; i < NB; i++) {
+        const f0 = F0 * Math.pow(F1 / F0, i / NB);
+        const f1 = F0 * Math.pow(F1 / F0, (i + 1) / NB);
+        const lo = Math.max(1, Math.floor(f0 / binHz));
+        const hi = Math.max(lo + 1, Math.floor(f1 / binHz));
+        ranges.push([lo, hi]);
+      }
+
+      // Estado de los picos que caen con retraso
+      const peak = new Array(NB).fill(0);
+      const peakT = new Array(NB).fill(0);
+      const hold = new Array(NB).fill(300);
+
+      const freqLabels = [10, 20, 50, 100, 250, 500, 1000, 2000, 4000, 8000, 16000];
+      const dbLabels = [-10, -20, -30, -40, -50, -60, -70, -80, -90, -100];
+
+      btn.style.display = 'none';
+
+      // Dibuja las leyendas y los ejes de la gráfica de barras
+      function dibujarEjes() {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#445';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(L, T);
+        ctx.lineTo(L, T + PH);
+        ctx.lineTo(L + PW, T + PH);
+        ctx.stroke();
+
+        ctx.fillStyle = '#9aa';
+        ctx.font = '13px sans-serif';
+
+        // Eje vertical: niveles en dB
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        for (const d of dbLabels) {
+          const y = T + PH * (1 - (d - MIN_DB) / (MAX_DB - MIN_DB));
+          ctx.fillText(d + ' dB', L - 8, y);
+          ctx.beginPath();
+          ctx.moveTo(L - 4, y);
+          ctx.lineTo(L, y);
+          ctx.stroke();
+        }
+
+        // Eje horizontal: frecuencias en Hz
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        for (const f of freqLabels) {
+          const x = L + PW * Math.log(f / F0) / Math.log(F1 / F0);
+          ctx.fillText(f >= 1000 ? (f / 1000) + ' kHz' : f + ' Hz', x, T + PH + 8);
+          ctx.beginPath();
+          ctx.moveTo(x, T + PH);
+          ctx.lineTo(x, T + PH + 4);
+          ctx.stroke();
+        }
+
+        // Títulos de los ejes
+        ctx.fillText('Frecuencia', L + PW / 2, H - 20);
+        ctx.save();
+        ctx.translate(16, T + PH / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Nivel', 0, 0);
+        ctx.restore();
+      }
+
+      // 3. Dibujo en cada cuadro
+      function draw() {
+        requestAnimationFrame(draw);
+
+        const forma = document.getElementById('forma').value;
+        const modo = document.getElementById('modo').value;
+        const colorFijo = document.getElementById('colorFijo').value;
+
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, W, H);
+
+        if (forma === 'onda') {
+          analyser.getByteTimeDomainData(waveData);
+          ctx.lineWidth = 3;
+          if (modo === 'fijo') {
+            ctx.strokeStyle = colorFijo;
+          } else {
+            const g = ctx.createLinearGradient(0, 0, W, 0);
+            g.addColorStop(0, 'red');
+            g.addColorStop(0.5, 'lime');
+            g.addColorStop(1, 'violet');
+            ctx.strokeStyle = g;
+          }
+          ctx.beginPath();
+          const paso = W / waveData.length;
+          for (let i = 0; i < waveData.length; i++) {
+            const desv = (waveData[i] - 128) / 128;
+            const y = H / 2 + desv * (H / 2) * 1.5;
+            if (i === 0) ctx.moveTo(0, y);
+            else ctx.lineTo(i * paso, y);
+          }
+          ctx.stroke();
+          return;
+        }
+
+        // Barras LED
+        analyser.getByteFrequencyData(freqData);
+        const now = performance.now();
+
+        ctx.fillStyle = '#06080b';
+        ctx.fillRect(L, T, PW, PH);
+
+        for (let i = 0; i < NB; i++) {
+          // Nivel de la columna: promedio de sus frecuencias
+          const [lo, hi] = ranges[i];
+          let suma = 0;
+          for (let j = lo; j < hi; j++) suma += freqData[j];
+          const frac = (suma / (hi - lo)) / 255; // escala directa, sin amplificar
+
+          // Pico: sube de golpe y cae despacio, con un retraso distinto en cada columna
+          if (frac >= peak[i]) {
+            peak[i] = frac;
+            peakT[i] = now;
+            hold[i] = 150 + Math.random() * 450;
+          } else if (now - peakT[i] > hold[i]) {
+            peak[i] = Math.max(frac, peak[i] - 0.006);
+          }
+
+          const x = L + i * barW + (barW - bw) / 2;
+
+          // LEDs de abajo hacia arriba: encendidos si el nivel llega hasta ellos
+          for (let s = 0; s < NS; s++) {
+            const sf = (s + 0.5) / NS;
+            const y = T + PH - (s + 1) * segH + gap / 2;
+            const h = segH - gap;
+            const col = modo === 'fijo' ? colorFijo : `hsl(${120 - sf * 120}, 100%, 50%)`;
+            ctx.globalAlpha = sf <= frac ? 1 : 0.12; // apagado = tenue
+            ctx.fillStyle = col;
+            ctx.fillRect(x, y, bw, h);
+          }
+
+          // LED del pico que cae
+          const ps = Math.min(NS - 1, Math.floor(peak[i] * NS));
+          if (peak[i] > 0.01) {
+            const sf = (ps + 0.5) / NS;
+            const y = T + PH - (ps + 1) * segH + gap / 2;
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = modo === 'fijo' ? colorFijo : `hsl(${120 - sf * 120}, 100%, 65%)`;
+            ctx.fillRect(x, y, bw, segH - gap);
+          }
+        }
+        ctx.globalAlpha = 1;
+
+        dibujarEjes();
+      }
+      draw();
+    } catch (e) {
+      alert('No se pudo acceder al micrófono: ' + e.message);
+    }
+  };
+</script>
+</body>
+</html>
